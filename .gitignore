@@ -1,0 +1,13 @@
+target/
+data/
+*.rdb
+*.aof
+.idea/
+*.iml
+.vscode/
+.classpath
+.project
+.settings/
+*.class
+*.log
+.DS_Store
