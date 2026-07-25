@@ -1,6 +1,6 @@
 # HLD - Mini Redis
 
-I built this to understand how Redis-like systems work internally: LRU, TTL, RDB/AOF, replication, and sharding. This is not a production Redis. Nodes run in the same JVM so the concepts stay easy to demo and debug.
+Distributed in-memory cache with LRU, TTL, RDB/AOF persistence, leader-follower replication, consistent-hash sharding, and pub/sub. Nodes are simulated in-process in the same JVM.
 
 ---
 
@@ -113,7 +113,7 @@ Leader sends current data + sequence number, then continues with the normal repl
 - Cross-shard transactions
 - Live key migration
 
-If someone asks what is missing for production, this is the honest list.
+These are left out on purpose to keep the core design clear.
 
 ---
 

@@ -143,7 +143,7 @@ Store an absolute `Instant`. Purge on access. No background sweeper yet - lazy e
 No lag metrics, no network partitions. Just an in-process broadcast list.
 
 **Hashing**  
-Demo cluster uses 50 virtual nodes. Without vnodes, distribution looked ugly with only 3 shards.
+Cluster setup uses 50 virtual nodes. Without vnodes, distribution looked ugly with only 3 shards.
 
 **Errors**
 - blank key -> IllegalArgumentException
@@ -221,7 +221,7 @@ mvn -q exec:java
 
 ---
 
-## Questions I expect in interviews
+## Common questions
 
 **Why LRU?**  
 Simple, and it maps cleanly to `LinkedHashMap`. LFU needs extra frequency tracking.
@@ -235,7 +235,7 @@ Fewer keys move when nodes change. Modulo-N reshuffles almost the whole keyspace
 **Why block writes on followers?**  
 Keeps a single writer per shard. Avoids conflicts.
 
-**What would I add next?**  
+**What would come next?**  
 A RESP server, better fsync policy, leader election/failover, slot-based clustering, and basic metrics (hit rate, repl lag).
 
 ---

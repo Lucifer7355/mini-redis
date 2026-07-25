@@ -18,7 +18,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.BiConsumer;
 
 /**
- * Interview-style walkthrough of Mini Redis features.
+ * Runs scenarios that exercise Mini Redis features end to end.
  */
 public final class Main {
 

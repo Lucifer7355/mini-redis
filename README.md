@@ -1,6 +1,6 @@
 # Mini Redis
 
-Small Redis-like distributed cache in Java 21. Built for learning / resume - not a drop-in Redis replacement.
+Small Redis-like distributed cache in Java 21.
 
 Features:
 - LRU eviction
@@ -31,7 +31,7 @@ pubsub/
 replication/   leader / follower
 sharding/      consistent hash
 cluster/       node + manager
-Main.java      demo
+Main.java      entry point
 ```
 
 ## Example
