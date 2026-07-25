@@ -36,6 +36,11 @@ mvn test
 mvn -q exec:java
 ```
 
+## Design docs
+
+- **[HLD.md](./HLD.md)** — system context, components, flows, scaling story  
+- **[LLD.md](./LLD.md)** — classes, UML, sequences, concurrency, patterns, interview Q&A  
+
 ## Design notes
 
 - **LRU**: `LinkedHashMap` in access-order + write lock on mutate/get (get must update order).
