@@ -1,218 +1,121 @@
-# High Level Design (HLD) — Mini Redis
+# HLD - Mini Redis
 
-> Goal: interview / resume pe clearly explain kar sako — *ye project kya hai, kahan pe kya fit hota hai, data kaise flow karta hai*.
+Maine ye project isliye banaya kyuki Redis ka internal design samajhna tha - LRU, TTL, AOF/RDB, replication, sharding. Ye production Redis nahi hai. Same JVM ke andar nodes simulate kiye hain taaki concepts clear rahein.
 
 ---
 
-## 1. Problem statement
+## Problem
 
-Redis jaisa **distributed in-memory cache** banana hai jo:
+Simple sa distributed cache chahiye tha jo:
 
-- fast key-value get/set de
-- memory bound ho (LRU)
+- get/set fast kare (memory me)
+- capacity full hone pe purani keys hataaye (LRU)
 - keys expire ho sake (TTL)
-- restart ke baad data wapas aa sake (persistence)
-- ek node fail hone pe read continue ho (replication)
-- data multiple machines pe split ho (sharding / cluster)
-- realtime messaging support kare (pub/sub)
-
-Ye production Redis nahi hai — **learning + system-design showcase** project hai (in-process / same-JVM cluster simulation).
+- process band hone pe data poora na udd jaye (persistence)
+- ek backup node rakhe (leader/follower)
+- keys alag-alag nodes pe baant sake (sharding)
+- channel pe message bhej sake (pubsub)
 
 ---
 
-## 2. System context
+## Big picture
 
-```text
-                 ┌──────────────────────────────┐
-   Client / Demo │         ClusterManager       │
-   (Main / API)  │   (consistent-hash router)   │
-                 └──────────────┬───────────────┘
-                                │ route(key)
-          ┌─────────────────────┼─────────────────────┐
-          ▼                     ▼                     ▼
-   ┌─────────────┐       ┌─────────────┐       ┌─────────────┐
-   │ Shard-1     │       │ Shard-2     │       │ Shard-3     │
-   │ (LEADER)    │       │ (LEADER)    │       │ (LEADER)    │
-   │  LruCache   │       │  LruCache   │       │  LruCache   │
-   │  Persist    │       │  Persist    │       │  Persist    │
-   │  PubSub     │       │  PubSub     │       │  PubSub     │
-   └──────┬──────┘       └─────────────┘       └─────────────┘
-          │ replicate
-          ▼
-   ┌─────────────┐
-   │ Follower(s) │  read-only replica
-   └─────────────┘
+Client seedha ClusterManager ko bolta hai. Manager key ka hash nikal ke usko sahi shard pe bhej deta hai.
+
+Har shard ek ClusterNode hai. Uske andar:
+- LruCache (actual data)
+- Persistence (disk)
+- PubSub (optional)
+- Replication (agar leader hai to followers ko sync)
+
+```
+Client
+  -> ClusterManager (consistent hash)
+       -> shard-1 (leader) ---> follower-1
+       -> shard-2 (leader)
+       -> shard-3 (leader)
 ```
 
-**Actors**
+Followers write nahi lete. Sirf read + leader se aaye updates.
 
-| Actor | Role |
+---
+
+## Components (short)
+
+**LruCache**  
+Asli store. LinkedHashMap access-order pe. Capacity cross hui to sabse purani (least recently used) nikal jaati hai. TTL bhi yahi handle hota hai.
+
+**PersistenceManager**  
+Do cheezein:
+1. Snapshot / RDB style file (`dump.rdb`) - poora dump ek baar me
+2. AOF (`appendonly.aof`) - har write ek line me append
+
+Restart pe pehle snapshot load, phir AOF replay.
+
+**ReplicationLeader / Follower**  
+Leader pe write hoti hai, phir command followers ko bhejta hai. Naya follower attach hote hi full snapshot milta hai, uske baad incremental SET/SETEX/DEL.
+
+**ConsistentHashRing**  
+Key -> node. Virtual nodes use kiye taaki distribution thodi even rahe. Seedha `hash % N` nahi kiya kyuki node add/remove pe almost sab keys shuffle ho jaati.
+
+**ClusterManager**  
+Upar wala API. `set/get/delete` ko sahi node tak pahunchata hai.
+
+**PubSubHub**  
+Cache se alag. Subscribe/publish. Message store nahi hota, sirf listeners ko milta hai.
+
+---
+
+## Main flows
+
+### Write
+1. ClusterManager key se shard nikalta hai
+2. Leader cache me set karta hai
+3. Agar AOF on hai to disk pe append
+4. Followers ko replicate
+
+### Read
+Shard locate -> cache.get. Expired/evicted ho to miss.
+
+### Restart
+`dump.rdb` load -> `appendonly.aof` replay -> ready
+
+### Follower attach
+Leader apna current data bhejta hai + sequence number. Uske baad normal replication stream.
+
+---
+
+## Tradeoffs (jo maine consciously liye)
+
+- AOF har write pe flush - safe but slow. Real Redis me `everysec` wagaira hota hai.
+- Replication async feel - leader wait nahi karta follower ack ka (yahan in-process hai).
+- Resharding / key migration nahi hai. Naya shard add kiya to nayi keys uspe jaayengi, purani move nahi hongi automatically.
+- Network protocol nahi likha (RESP). Focus internals pe rakha.
+
+---
+
+## Scaling mentally kaise sochu
+
+| Need | Kya karna padega |
 |---|---|
-| Application / `Main` | Commands bhejta hai (SET/GET/DEL/PUBLISH…) |
-| `ClusterManager` | Key → sahi shard decide karta hai |
-| `ClusterNode` (Leader) | Writes accept, persist, replicate |
-| `ClusterNode` (Follower) | Reads only, leader se sync |
-| Disk (`dump.rdb`, `appendonly.aof`) | Durability |
+| Zyada memory / writes | shards badhao |
+| Zyada reads | followers lagao |
+| Kam data loss | AOF rakho + frequent snapshot |
+| Failover | abhi manual - election nahi hai |
 
 ---
 
-## 3. Functional requirements
+## Scope se bahar
 
-| ID | Requirement |
-|---|---|
-| FR1 | SET / GET / DELETE key-value |
-| FR2 | Capacity exceed → **LRU eviction** |
-| FR3 | Optional **TTL**; expire ke baad key invisible |
-| FR4 | **Snapshot (RDB-style)** dump + load |
-| FR5 | **AOF** append log + replay + rewrite |
-| FR6 | **Pub/Sub** channels |
-| FR7 | **Leader → Follower** replication (full sync + incremental) |
-| FR8 | Followers **read-only** |
-| FR9 | **Consistent hashing** se sharding |
-| FR10 | **Cluster** multi-shard routing |
+- Redis wire protocol
+- Auto leader election
+- Multi-key transactions across shards
+- Live resharding
+
+Agar interview me poochhe ki "production me kya missing hai" - yahi bolna.
 
 ---
 
-## 4. Non-functional requirements
+Code padhne ka order: `LruCache` -> persistence -> replication -> hash ring -> `ClusterNode` -> `ClusterManager` -> `Main`.
 
-| Area | Choice in this project |
-|---|---|
-| Latency | In-memory `LinkedHashMap`; O(1) avg get/set |
-| Consistency | Single leader per shard (strong on leader); async repl to followers |
-| Durability | Snapshot + AOF (AOF every write flush) |
-| Scalability | Horizontal via more shards on hash ring |
-| Availability | Follower se reads (failover automation *not* implemented) |
-| Thread safety | `ReadWriteLock` / concurrent collections on shared state |
-
----
-
-## 5. High-level components
-
-```text
-┌─────────────────────────────────────────────────────────────┐
-│                        CLUSTER LAYER                        │
-│  ClusterManager  →  ConsistentHashRing  →  ClusterNode[]    │
-└─────────────────────────────────────────────────────────────┘
-                              │
-┌─────────────────────────────┴───────────────────────────────┐
-│                         NODE LAYER                          │
-│  Role: STANDALONE | LEADER | FOLLOWER                       │
-│  ┌──────────┐ ┌────────────┐ ┌────────┐ ┌────────────────┐  │
-│  │ LruCache │ │Persistence │ │ PubSub │ │ Replication*   │  │
-│  │ + TTL    │ │ Snapshot   │ │  Hub   │ │ Leader/Follow  │  │
-│  │          │ │ AOF        │ │        │ │                │  │
-│  └──────────┘ └────────────┘ └────────┘ └────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
-```
-
-| Component | Responsibility |
-|---|---|
-| **LruCache** | Hot data; LRU + TTL |
-| **PersistenceManager** | Snapshot save/load + AOF append/replay |
-| **PubSubHub** | Channel fan-out messaging |
-| **ReplicationLeader / Follower** | Copy writes to replicas |
-| **ConsistentHashRing** | Key → shard mapping |
-| **ClusterManager** | Cluster-wide SET/GET/DEL API |
-
----
-
-## 6. End-to-end flows
-
-### 6.1 Write path (cluster)
-
-```text
-Client SET key=user:1 value=ankit
-        │
-        ▼
-ClusterManager.locate(key)  ──hash──►  Shard-2 (LEADER)
-        │
-        ▼
-Leader.cache.set(...)
-        │
-        ├──► AOF append  (if enabled)
-        └──► ReplicationLeader.broadcast(SET) ──► Followers.apply()
-```
-
-### 6.2 Read path
-
-```text
-Client GET key
-   → ClusterManager.locate(key)
-   → owning shard LruCache.get
-   → miss if expired / evicted / never set
-```
-
-Follower se direct read bhi possible (same key’s replica), lekin cluster router by default **leader shards** pe jaata hai.
-
-### 6.3 Crash recovery
-
-```text
-Node start
-  1. Load dump.rdb   (point-in-time snapshot)
-  2. Replay appendonly.aof  (writes after / including log)
-  3. Serve traffic
-```
-
-### 6.4 Replication attach
-
-```text
-Follower attaches to Leader
-  1. Leader sends full cache snapshot + sequence #
-  2. Follower loadAll(snapshot)
-  3. Later writes → ReplCommand stream (SET / SETEX / DEL)
-```
-
-### 6.5 Pub/Sub
-
-```text
-SUBSCRIBE news  →  register listener on channel
-PUBLISH news m  →  fan-out to all listeners (not stored in cache)
-```
-
----
-
-## 7. Data model (logical)
-
-| Concept | Fields |
-|---|---|
-| Key | non-blank string |
-| Value | string |
-| Expiry | optional absolute timestamp |
-| Shard | nodeId owning the key |
-| Repl seq | monotonic long on leader |
-
-Physical files:
-
-- `dump.rdb` — binary snapshot  
-- `appendonly.aof` — text command log (`SET`, `SETEX`, `DEL`)
-
----
-
-## 8. Capacity & scaling story (interview)
-
-| Scale | Approach |
-|---|---|
-| Single machine | One `STANDALONE` / `LEADER` node |
-| More memory / QPS | Add shards → ring rebalance (keys remapped; *live migration not built*) |
-| Read scale | Attach followers per shard |
-| Durability tradeoff | Snapshot only = faster, more data loss window; AOF = safer, more disk I/O |
-
----
-
-## 9. What is **not** in scope (honest)
-
-- Network protocol / Redis RESP wire format  
-- Automatic leader election / failover  
-- Cross-shard transactions  
-- Live resharding / key migration  
-- Disk-backed values beyond snapshot/AOF  
-
-Yeh intentionally rakha hai taaki core ideas clear rahein.
-
----
-
-## 10. One-line pitch (resume / interview)
-
-> “I built a Mini Redis: in-memory LRU+TTL cache with RDB/AOF persistence, leader-follower replication, consistent-hash sharding, and pub/sub — implemented in Java 21 with unit tests and an end-to-end demo.”
-
-Next: detailed class design → [`LLD.md`](./LLD.md)
+LLD ke liye dekh: [LLD.md](./LLD.md)
