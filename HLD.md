@@ -1,32 +1,33 @@
 # HLD - Mini Redis
 
-Maine ye project isliye banaya kyuki Redis ka internal design samajhna tha - LRU, TTL, AOF/RDB, replication, sharding. Ye production Redis nahi hai. Same JVM ke andar nodes simulate kiye hain taaki concepts clear rahein.
+I built this to understand how Redis-like systems work internally: LRU, TTL, RDB/AOF, replication, and sharding. This is not a production Redis. Nodes run in the same JVM so the concepts stay easy to demo and debug.
 
 ---
 
-## Problem
+## What I was solving
 
-Simple sa distributed cache chahiye tha jo:
+I wanted a small distributed cache that can:
 
-- get/set fast kare (memory me)
-- capacity full hone pe purani keys hataaye (LRU)
-- keys expire ho sake (TTL)
-- process band hone pe data poora na udd jaye (persistence)
-- ek backup node rakhe (leader/follower)
-- keys alag-alag nodes pe baant sake (sharding)
-- channel pe message bhej sake (pubsub)
+- do fast get/set in memory
+- evict old keys when full (LRU)
+- expire keys after a TTL
+- survive restarts without losing everything (persistence)
+- keep a read replica (leader / follower)
+- split keys across nodes (sharding)
+- push messages on channels (pubsub)
 
 ---
 
 ## Big picture
 
-Client seedha ClusterManager ko bolta hai. Manager key ka hash nikal ke usko sahi shard pe bhej deta hai.
+The client talks to `ClusterManager`. The manager hashes the key and forwards the call to the right shard.
 
-Har shard ek ClusterNode hai. Uske andar:
-- LruCache (actual data)
-- Persistence (disk)
-- PubSub (optional)
-- Replication (agar leader hai to followers ko sync)
+Each shard is a `ClusterNode`. Inside it:
+
+- `LruCache` holds the data
+- persistence writes to disk
+- pubsub is available on the node
+- if the node is a leader, it replicates to followers
 
 ```
 Client
@@ -36,86 +37,86 @@ Client
        -> shard-3 (leader)
 ```
 
-Followers write nahi lete. Sirf read + leader se aaye updates.
+Followers do not accept writes. They only serve reads and apply updates from the leader.
 
 ---
 
-## Components (short)
+## Components
 
 **LruCache**  
-Asli store. LinkedHashMap access-order pe. Capacity cross hui to sabse purani (least recently used) nikal jaati hai. TTL bhi yahi handle hota hai.
+The actual store. `LinkedHashMap` in access-order. When capacity is crossed, the least recently used key goes out. TTL checks live here too.
 
 **PersistenceManager**  
-Do cheezein:
-1. Snapshot / RDB style file (`dump.rdb`) - poora dump ek baar me
-2. AOF (`appendonly.aof`) - har write ek line me append
+Two pieces:
+1. Snapshot / RDB-style file (`dump.rdb`) - full dump
+2. AOF (`appendonly.aof`) - one line per write
 
-Restart pe pehle snapshot load, phir AOF replay.
+On restart: load snapshot first, then replay AOF.
 
 **ReplicationLeader / Follower**  
-Leader pe write hoti hai, phir command followers ko bhejta hai. Naya follower attach hote hi full snapshot milta hai, uske baad incremental SET/SETEX/DEL.
+Writes hit the leader, then get pushed to followers. A new follower gets a full snapshot on attach, then incremental SET / SETEX / DEL.
 
 **ConsistentHashRing**  
-Key -> node. Virtual nodes use kiye taaki distribution thodi even rahe. Seedha `hash % N` nahi kiya kyuki node add/remove pe almost sab keys shuffle ho jaati.
+Maps key -> node. Uses virtual nodes so distribution is less skewed. I avoided plain `hash % N` because adding/removing a node reshuffles almost everything.
 
 **ClusterManager**  
-Upar wala API. `set/get/delete` ko sahi node tak pahunchata hai.
+Top-level API. Routes `set` / `get` / `delete` to the owning node.
 
 **PubSubHub**  
-Cache se alag. Subscribe/publish. Message store nahi hota, sirf listeners ko milta hai.
+Separate from the KV store. Subscribe / publish only. Messages are not saved as cache entries.
 
 ---
 
 ## Main flows
 
 ### Write
-1. ClusterManager key se shard nikalta hai
-2. Leader cache me set karta hai
-3. Agar AOF on hai to disk pe append
-4. Followers ko replicate
+1. ClusterManager finds the shard for the key
+2. Leader updates its cache
+3. If AOF is on, append to disk
+4. Replicate to followers
 
 ### Read
-Shard locate -> cache.get. Expired/evicted ho to miss.
+Locate shard -> `cache.get`. Miss if the key expired or got evicted.
 
 ### Restart
-`dump.rdb` load -> `appendonly.aof` replay -> ready
+Load `dump.rdb` -> replay `appendonly.aof` -> ready
 
 ### Follower attach
-Leader apna current data bhejta hai + sequence number. Uske baad normal replication stream.
+Leader sends current data + sequence number, then continues with the normal replication stream.
 
 ---
 
-## Tradeoffs (jo maine consciously liye)
+## Tradeoffs I knowingly made
 
-- AOF har write pe flush - safe but slow. Real Redis me `everysec` wagaira hota hai.
-- Replication async feel - leader wait nahi karta follower ack ka (yahan in-process hai).
-- Resharding / key migration nahi hai. Naya shard add kiya to nayi keys uspe jaayengi, purani move nahi hongi automatically.
-- Network protocol nahi likha (RESP). Focus internals pe rakha.
+- AOF flushes on every write. Safer, slower. Real Redis has options like `everysec`.
+- Replication is fire-and-forget here (in-process). No follower ack / lag tracking.
+- No live resharding. New shards get new keys; old keys do not migrate automatically.
+- No network protocol (RESP). I kept the focus on internals.
 
 ---
 
-## Scaling mentally kaise sochu
+## How I think about scaling
 
-| Need | Kya karna padega |
+| Need | What to do |
 |---|---|
-| Zyada memory / writes | shards badhao |
-| Zyada reads | followers lagao |
-| Kam data loss | AOF rakho + frequent snapshot |
-| Failover | abhi manual - election nahi hai |
+| More memory / write throughput | add shards |
+| More reads | add followers |
+| Less data loss | keep AOF + take snapshots often |
+| Failover | not automated yet - no leader election |
 
 ---
 
-## Scope se bahar
+## Out of scope
 
 - Redis wire protocol
 - Auto leader election
-- Multi-key transactions across shards
-- Live resharding
+- Cross-shard transactions
+- Live key migration
 
-Agar interview me poochhe ki "production me kya missing hai" - yahi bolna.
+If someone asks what is missing for production, this is the honest list.
 
 ---
 
-Code padhne ka order: `LruCache` -> persistence -> replication -> hash ring -> `ClusterNode` -> `ClusterManager` -> `Main`.
+Suggested reading order: `LruCache` -> persistence -> replication -> hash ring -> `ClusterNode` -> `ClusterManager` -> `Main`.
 
-LLD ke liye dekh: [LLD.md](./LLD.md)
+Class-level detail: [LLD.md](./LLD.md)

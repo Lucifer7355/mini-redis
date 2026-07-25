@@ -1,11 +1,11 @@
 # Mini Redis
 
-Redis jaisa chota distributed cache, Java 21 me. Resume / learning ke liye banaya - asli Redis ka replacement nahi.
+Small Redis-like distributed cache in Java 21. Built for learning / resume - not a drop-in Redis replacement.
 
-Jo hai:
+Features:
 - LRU eviction
 - TTL
-- Snapshot (RDB style) + AOF
+- Snapshot (RDB-style) + AOF
 - Pub/Sub
 - Leader-follower replication
 - Consistent hashing + cluster routing
@@ -20,7 +20,7 @@ mvn -q exec:java
 ## Docs
 
 - [HLD.md](./HLD.md) - overall design
-- [LLD.md](./LLD.md) - classes / details
+- [LLD.md](./LLD.md) - classes and details
 
 ## Layout
 
@@ -34,7 +34,7 @@ cluster/       node + manager
 Main.java      demo
 ```
 
-## Quick example
+## Example
 
 ```java
 ClusterManager cluster = new ClusterManager(50);

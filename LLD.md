@@ -1,8 +1,6 @@
 # LLD - Mini Redis
 
-HLD me overall flow hai. Yahan classes aur thoda detail.
-
-Folder roughly aisa hai:
+HLD covers the overall flow. This file is about the classes and a few implementation details.
 
 ```
 com.miniredis
@@ -20,81 +18,81 @@ com.miniredis
 ## Classes
 
 ### CacheEntry
-Bas value + optional expiry time. Immutable rakha. Expiry check `isExpired(now)` se.
+Just a value + optional expiry. Immutable. Expiry check is `isExpired(now)`.
 
 ### LruCache
-Yahi core hai.
+This is the core.
 
-- `LinkedHashMap` with accessOrder = true
-- capacity cross -> eldest remove
-- TTL lazy purge (get/set time pe check)
-- lock: `ReentrantReadWriteLock`
-  - get pe bhi write lock isliye kyuki access-order update hota hai. Read lock se race aa sakti thi.
+- `LinkedHashMap` with `accessOrder = true`
+- over capacity -> remove eldest
+- TTL is lazy (checked on get/set)
+- locking via `ReentrantReadWriteLock`
+  - `get` also takes the write lock because access-order updates the map. A read lock alone can race.
 
-Methods: `set`, `get`, `delete`, `snapshot`, `loadAll`, `keys`
+APIs: `set`, `get`, `delete`, `snapshot`, `loadAll`, `keys`
 
-Clock inject kiya hai taaki tests me time fake kar saku.
+`Clock` is injected so tests can fake time.
 
 ### SnapshotStore
-Binary file. Format roughly:
+Binary file. Rough format:
 
 ```
 MAGIC | VERSION | count
-then for each key: key, value, expiryMillis (-1 if no ttl)
+then for each entry: key, value, expiryMillis (-1 if no ttl)
 ```
 
-Pehle `.tmp` pe likhta hoon, phir rename. Windows pe atomic move fail ho to normal replace.
+Write to a `.tmp` file first, then rename. On Windows, atomic move can fail, so there is a fallback to a normal replace.
 
 ### AofLog
-Text log. Lines jaise:
+Text log. Lines look like:
 ```
 SET user ankit
 SETEX session 3600000 token
 DEL user
 ```
 
-Space wale keys ke liye simple escape (`\s` etc). `rewrite()` live dataset se naya compact AOF banata hai.
+Keys/values with spaces get a simple escape (`\s`, etc). `rewrite()` rebuilds a compact AOF from the live dataset.
 
 ### PersistenceManager
-Glue. `recover()`, aur set/del pe AOF hooks. Snapshot alag se `saveSnapshot()`.
+Glue layer. `recover()` plus hooks on set/delete for AOF. Snapshots are triggered with `saveSnapshot()`.
 
 ### PubSubHub
-Map: channel -> list of listeners. Publish = sabko call. Cache se linked nahi.
+`channel -> list of listeners`. Publish calls everyone. Not tied to the KV store.
 
 ### ReplCommand
-Sealed: Set / SetEx / Del. Har command ke saath sequence number.
+Sealed type: Set / SetEx / Del. Each command carries a sequence number.
 
 ### ReplicationLeader
-- followers list
-- attach pe full sync (`cache.snapshot()`)
-- har write pe sequence++ aur broadcast
+- keeps follower list
+- on attach: full sync from `cache.snapshot()`
+- on each write: bump sequence and broadcast
 
 ### ReplicationFollower
-- `fullSync` se start
-- `apply` me sequence check (purana/duplicate ignore)
-- khud se write ClusterNode pe block hai
+- starts from `fullSync`
+- `apply` ignores older/duplicate sequences
+- local writes are blocked at `ClusterNode`
 
 ### ConsistentHashRing
-MD5 se hash. Har node ke liye kai virtual nodes ring pe. `route(key)` ceiling entry, wrap around to first.
+MD5 hash. Multiple virtual nodes per physical node. `route(key)` takes the ceiling entry and wraps to the first if needed.
 
 ### ClusterNode
-Ek shard ka facade.
+Facade for one shard.
 
 Roles:
-- STANDALONE - akela node, persist allowed
-- LEADER - writes + replicate
+- STANDALONE - single node with persistence
+- LEADER - accepts writes and replicates
 - FOLLOWER - read only
 
-Factory methods: `standalone()`, `leader()`, `follower()`
+Factories: `standalone()`, `leader()`, `follower()`
 
-set() roughly: cache update -> persistence hook -> replicate (agar leader)
+`set()` path: update cache -> persistence hook -> replicate (if leader)
 
 ### ClusterManager
-Ring + shard list. `set/get/delete` locate karke forward. Followers ring pe nahi daalte (sirf leaders/standalone).
+Owns the ring + shard list. Forwards `set/get/delete` after locate. Only leaders/standalone nodes sit on the ring.
 
 ---
 
-## Class relations (simple)
+## How things connect
 
 ```
 ClusterManager ----uses----> ConsistentHashRing
@@ -109,23 +107,23 @@ ClusterManager ----uses----> ConsistentHashRing
 
 ---
 
-## SET flow (cluster + repl)
+## SET path (cluster + replication)
 
 ```
-client.set(k,v)
+client.set(k, v)
   ClusterManager.locate(k) -> node
   node.set:
     cache.set
-    aof.append (if on)
-    leader.replicateSet -> each follower.apply
+    aof.append (if enabled)
+    leader.replicateSet -> follower.apply
 ```
 
-## Boot
+## Boot path
 
 ```
-new ClusterNode.leader(...)
-  new LruCache
-  new PersistenceManager
+ClusterNode.leader(...)
+  create LruCache
+  create PersistenceManager
   recover:
     load rdb
     replay aof
@@ -133,19 +131,19 @@ new ClusterNode.leader(...)
 
 ---
 
-## Thodi implementation notes
+## Notes from implementation
 
 **LRU**  
-Access order map + size check. Zyada kuch magic nahi.
+Access-order map + size check. Nothing fancy.
 
 **TTL**  
-Absolute Instant store. Har access pe purge. Background expiry thread nahi hai abhi - lazy enough for this project.
+Store an absolute `Instant`. Purge on access. No background sweeper yet - lazy expiry is enough for this project.
 
-**Replication gap**  
-Follower lag / network partition handling nahi. In-process list pe broadcast hai.
+**Replication**  
+No lag metrics, no network partitions. Just an in-process broadcast list.
 
 **Hashing**  
-Virtual nodes = 50 default cluster demo me. Kam nodes pe bina vnodes ke distribution gandi lagti thi isliye add kiya.
+Demo cluster uses 50 virtual nodes. Without vnodes, distribution looked ugly with only 3 shards.
 
 **Errors**
 - blank key -> IllegalArgumentException
@@ -155,25 +153,25 @@ Virtual nodes = 50 default cluster demo me. Kam nodes pe bina vnodes ke distribu
 
 ---
 
-## Patterns - jo use hue / nahi hue
+## Patterns
 
-Jo use kiye:
-- Facade -> ClusterNode, ClusterManager
-- Factory methods -> node create
-- Command-ish -> ReplCommand for repl stream
+Used:
+- Facade - `ClusterNode`, `ClusterManager`
+- Factory methods - node creation
+- Command-style objects - `ReplCommand` for the repl stream
 
-Jo force nahi kiye:
-- Strategy for eviction (sirf LRU chahiye tha)
-- Singleton (testing mushkil hoti)
-- Decorator stack
+Skipped on purpose:
+- Strategy for eviction (only LRU needed)
+- Singleton (painful for tests)
+- Decorator stacks
 
-Over-engineering avoid kiya. Interview me bhi yahi bolna better hai.
+I did not want to force design patterns just to fill a diagram.
 
 ---
 
 ## Threading
 
-| Jagah | Guard |
+| Place | Guard |
 |---|---|
 | LruCache map | RW lock |
 | AOF writer | ReentrantLock + flush |
@@ -184,7 +182,7 @@ Over-engineering avoid kiya. Interview me bhi yahi bolna better hai.
 
 ---
 
-## Kaise use karun (quick)
+## Quick usage
 
 ```java
 // single node
@@ -208,36 +206,38 @@ c.set("user:1", "ankit");
 
 ---
 
-## Tests kya cover karte hain
+## What the tests cover
 
-- LRU eviction + TTL expiry
+- LRU eviction and TTL expiry
 - snapshot save/load, AOF replay, recover order
-- follower full sync + incremental
-- hash ring same key -> same node, thoda even spread
-- cluster set/get, follower write reject, pubsub deliver
+- follower full sync + incremental updates
+- hash ring: same key -> same node, roughly even spread
+- cluster get/set, follower write reject, pubsub delivery
 
-`mvn test`  
-demo: `mvn -q exec:java`
+```bash
+mvn test
+mvn -q exec:java
+```
 
 ---
 
-## Interview me commonly poochha jaata hai
+## Questions I expect in interviews
 
-**LRU kyun?**  
-Simple, LinkedHashMap se natural fit. LFU ke liye frequency counters alag manage karne padte.
+**Why LRU?**  
+Simple, and it maps cleanly to `LinkedHashMap`. LFU needs extra frequency tracking.
 
 **RDB vs AOF?**  
-RDB = fast load, beech ke writes lose ho sakte. AOF = har write log, recover better, file badi hoti hai isliye rewrite.
+RDB loads fast but you can lose writes since the last dump. AOF is more durable, grows faster, so you rewrite it.
 
-**Consistent hashing kyun?**  
-Nodes change pe kam keys move. Modulo N pe reshuffle zyada.
+**Why consistent hashing?**  
+Fewer keys move when nodes change. Modulo-N reshuffles almost the whole keyspace.
 
-**Follower pe write kyun band?**  
-Split brain / conflict avoid. Single writer per shard.
+**Why block writes on followers?**  
+Keeps a single writer per shard. Avoids conflicts.
 
-**Kya improve karunga next?**  
-RESP server, proper fsync policy, failover/election, slot based cluster, metrics (hit rate, repl lag).
+**What would I add next?**  
+A RESP server, better fsync policy, leader election/failover, slot-based clustering, and basic metrics (hit rate, repl lag).
 
 ---
 
-Bas itna. Code me pehle `LruCache` kholna, phir baaki layers.
+Start with `LruCache`, then walk outward through the layers.
